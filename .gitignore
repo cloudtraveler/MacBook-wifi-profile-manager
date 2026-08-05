@@ -1,0 +1,27 @@
+# 빌드 산출물
+dist/
+dist_standalone/
+build/
+*.spec
+
+# 파이썬
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# 에디터
+.vscode/
+.idea/
+*.swp
+
+# 로컬 설정 (실행 시 ~/.wifi_profile_manager 에 생성되지만 실수 방지용)
+profiles.json
+*.log

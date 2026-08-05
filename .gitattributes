@@ -1,0 +1,15 @@
+# 기본: 저장소에는 항상 LF로 저장
+* text=auto eol=lf
+
+# 셸 스크립트와 파이썬은 반드시 LF (CRLF면 macOS/Linux에서 실행 불가)
+*.sh    text eol=lf
+*.py    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.plist text eol=lf
+*.md    text eol=lf
+
+# 바이너리 — 줄바꿈 변환 금지
+*.icns  binary
+*.png   binary
+*.zip   binary

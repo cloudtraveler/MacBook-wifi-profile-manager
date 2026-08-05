@@ -1,0 +1,168 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ---------------------------------------------------------------- 정적 검사
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 파이썬 문법 검사
+        run: python -m compileall -q src/
+
+      - name: 셸 스크립트 문법 검사
+        run: for f in scripts/*.sh; do bash -n "$f"; done
+
+      - name: 핵심 로직 테스트
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq python3-tk xvfb
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "src")
+          import wifi_profile_manager as w
+
+          p = {"ssid": "T", "location": "본사", "mode": "static", "ip": "192.168.0.50",
+               "subnet": "255.255.255.0", "router": "192.168.0.1",
+               "dns": "8.8.8.8", "search": ""}
+          assert w.validate_profile(p) == [], w.validate_profile(p)
+          assert w.validate_profile(dict(p, router="10.0.0.1")), "대역 불일치를 잡지 못함"
+          assert w.validate_profile(dict(p, ip="999.1.1.1")), "잘못된 IP를 잡지 못함"
+          assert w.validate_profile(dict(p, subnet="255.0.255.0")), "잘못된 마스크를 잡지 못함"
+
+          cmds = w.build_ipconfig_cmds("Wi-Fi", p)
+          assert any("-setmanual" in c for c in cmds)
+          assert any("-setdhcp" in c for c in w.build_ipconfig_cmds("Wi-Fi", dict(p, mode="dhcp")))
+          print("검증 로직 통과")
+          PY
+
+      - name: 웹 UI API 테스트
+        run: |
+          python - <<'PY'
+          import sys, threading, time, json, urllib.request, re
+          sys.path.insert(0, "src")
+          import wifi_profile_manager as w, webui
+
+          w.run = lambda cmd, timeout=30: (0, "", "")
+          w.run_admin = lambda c, timeout=180: (0, "", "")
+          w.power_on = lambda d: None
+          w.scan_networks = lambda: {"AP1": -50}
+          w.current_ssid = lambda d: "AP1"
+          w.current_ip = lambda d: "10.0.0.2"
+          w.preferred_networks = lambda d: []
+          w.detect_wifi_device = lambda: "en0"
+          w.detect_wifi_service = lambda d: "Wi-Fi"
+          w.keychain_set = w.keychain_del = lambda *a: None
+          w.keychain_get = lambda s: ""
+          store = w.Store(); store.profiles = []; store.save = lambda: None
+          w.Store = lambda path=None: store
+
+          cap = {}
+          webui.subprocess.call = lambda a: cap.update(url=a[1])
+          threading.Thread(
+              target=lambda: webui.start_web(w, port=8912, open_browser=True),
+              daemon=True).start()
+          time.sleep(1.5)
+          url = cap["url"]
+          tok = re.search(r"t=([^&]+)", url).group(1)
+          base = "http://127.0.0.1:8912"
+
+          def call(path, body=None):
+              r = urllib.request.Request(
+                  base + path + "?t=" + tok,
+                  data=json.dumps(body).encode() if body else None,
+                  headers={"Content-Type": "application/json"},
+                  method="POST" if body else "GET")
+              return json.loads(urllib.request.urlopen(r).read().decode())
+
+          try:
+              urllib.request.urlopen(base + "/api/state")
+              raise SystemExit("토큰 없는 요청이 통과됨")
+          except urllib.error.HTTPError as e:
+              assert e.code == 403
+
+          r = call("/api/save", {"ssid": "AP1", "location": "본사 3층",
+                                 "mode": "dhcp", "ip": "", "subnet": "",
+                                 "router": "", "dns": "", "search": "",
+                                 "password": ""})
+          assert r["ok"], r
+          st = call("/api/state")
+          assert st["profiles"][0]["location"] == "본사 3층", st
+          print("웹 UI API 통과")
+          PY
+
+  # ---------------------------------------------------------------- 번들 빌드
+  build-app:
+    needs: check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 경량 .app 번들 빌드
+        run: ./scripts/build_app.sh
+
+      - name: 압축
+        run: |
+          VERSION=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' src/wifi_profile_manager.py | head -1)
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          cd dist && zip -r -q -y "../WiFiProfileManager-${VERSION}-macos.zip" "WiFi Profile Manager.app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WiFiProfileManager-app
+          path: WiFiProfileManager-*.zip
+
+  # -------------------------------------------------- 완전 독립형(파이썬 내장)
+  build-standalone:
+    needs: check
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tk 확인
+        run: python -c "import tkinter; print('TkVersion', tkinter.TkVersion)"
+
+      - name: 독립형 번들 빌드
+        run: ./scripts/build_standalone.sh
+
+      - name: 압축
+        run: |
+          VERSION=$(sed -n 's/^APP_VERSION = "\(.*\)"/\1/p' src/wifi_profile_manager.py | head -1)
+          cd dist_standalone && zip -r -q -y "../WiFiProfileManager-${VERSION}-macos-standalone.zip" "WiFi Profile Manager.app"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WiFiProfileManager-standalone
+          path: WiFiProfileManager-*-standalone.zip
+
+  # ---------------------------------------------------------------- 릴리스
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-app, build-standalone]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.zip
+          generate_release_notes: true
